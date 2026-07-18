@@ -21,6 +21,64 @@ function activeMonth() {
 
 // ── READ ───────────────────────────────────────────────────────────────────
 
+// ── Saldo acumulado (replicates frontend getSaldoAcumulado) ────────────────
+// Soma todas entradas confirmadas - despesas confirmadas - parcelas vencidas
+// desde sempre até o mês atual, independente do mês selecionado
+function calcSaldoAcumulado(entradas, despesas, cartao) {
+  const hoje = new Date();
+  const anoAtual = hoje.getFullYear();
+  const mesAtual = hoje.getMonth() + 1;
+  const curIdx = anoAtual * 12 + mesAtual - 1;
+
+  let totalE = 0;
+  (entradas || []).forEach(e => {
+    if (e.recorrente) {
+      const origemYM = (e.data_lancamento || '').slice(0, 7);
+      if (!origemYM) return;
+      const [oy, om] = origemYM.split('-').map(Number);
+      const startIdx = oy * 12 + om - 1;
+      for (let idx = startIdx; idx <= curIdx; idx++) {
+        const y = Math.floor(idx / 12);
+        const m = (idx % 12) + 1;
+        const ym = `${y}-${String(m).padStart(2, '0')}`;
+        if (e.status_map && e.status_map[ym]) totalE += parseFloat(e.valor);
+      }
+    } else {
+      if (e.confirmado) totalE += parseFloat(e.valor);
+    }
+  });
+
+  let totalD = 0;
+  (despesas || []).forEach(e => {
+    if (e.recorrente) {
+      const origemYM = (e.data_lancamento || '').slice(0, 7);
+      if (!origemYM) return;
+      const [oy, om] = origemYM.split('-').map(Number);
+      const startIdx = oy * 12 + om - 1;
+      for (let idx = startIdx; idx <= curIdx; idx++) {
+        const y = Math.floor(idx / 12);
+        const m = (idx % 12) + 1;
+        const ym = `${y}-${String(m).padStart(2, '0')}`;
+        if (e.status_map && e.status_map[ym]) totalD += parseFloat(e.valor);
+      }
+    } else {
+      if (e.confirmado) totalD += parseFloat(e.valor);
+    }
+  });
+
+  let totalP = 0;
+  (cartao || []).forEach(c => {
+    const [oy, om] = c.inicio.split('-').map(Number);
+    const startIdx = oy * 12 + om - 1;
+    const endIdx = startIdx + parseInt(c.parcelas) - 1;
+    const lastIdx = Math.min(curIdx, endIdx);
+    const qtd = Math.max(0, lastIdx - startIdx + 1);
+    totalP += qtd * (c.total / c.parcelas);
+  });
+
+  return totalE - totalD - totalP;
+}
+
 export async function getMonthSummary(userId, month = null) {
   const ym = month || activeMonth();
   const [y, m] = ym.split('-').map(Number);
@@ -58,6 +116,9 @@ export async function getMonthSummary(userId, month = null) {
   // Investment summary
   const invTotal = calcInvTotal(investimentos || []);
 
+  // Saldo acumulado (disponível em conta — independente do mês selecionado)
+  const saldoDisponivel = calcSaldoAcumulado(entradas, despesas, cartao);
+
   return {
     month: ym,
     entradas: { total: totalE, confirmado: confirmedE, count: monthEntradas.length, confirmedCount: monthEntradas.filter(e => isConfirmed(e, ym)).length },
@@ -65,10 +126,11 @@ export async function getMonthSummary(userId, month = null) {
     cartao: { total: totalP, count: monthParcelas.length },
     saldoRealizado: confirmedE - confirmedD - totalP,
     saldoPrevisto: totalE - totalD - totalP,
+    saldoDisponivel,
     pendingEntradas: pendingEntradas.map(e => ({ desc: e.descricao, valor: e.valor, data: e.data_lancamento })),
     pendingDespesas: pendingDespesas.map(e => ({ desc: e.descricao, valor: e.valor, data: e.data_lancamento })),
     investimentos: invTotal,
-    patrimonioLiquido: confirmedE - confirmedD - totalP + invTotal.total,
+    patrimonioLiquido: saldoDisponivel + invTotal.total,
   };
 }
 
