@@ -180,9 +180,13 @@ async function handleQuery(type, userId, phone, aiMessage, senderName) {
 
     case 'saldo': {
       await sendTextMessage(phone,
-        `💰 *Saldo de ${formatMonth(summary.month)}*\n\n` +
-        `✅ Saldo realizado: *${fmt(summary.saldoRealizado)}*\n` +
-        `📊 Saldo previsto: ${fmt(summary.saldoPrevisto)}\n\n` +
+        `💰 *Saldo disponível em conta*\n` +
+        `*${fmt(summary.saldoDisponivel)}*\n` +
+        `_(acumulado desde o início)_\n\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `📅 *${formatMonth(summary.month)}*\n` +
+        `✅ Realizado no mês: ${fmt(summary.saldoRealizado)}\n` +
+        `📊 Previsto no mês: ${fmt(summary.saldoPrevisto)}\n\n` +
         `📈 Entradas recebidas: ${fmt(summary.entradas.confirmado)}\n` +
         `📉 Despesas pagas: ${fmt(summary.despesas.confirmado)}\n` +
         `💳 Parcelas: ${fmt(summary.cartao.total)}\n\n` +
