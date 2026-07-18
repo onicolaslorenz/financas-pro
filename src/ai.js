@@ -75,12 +75,14 @@ EXEMPLOS:
 export async function processMessage(userMessage, senderName, summary) {
   const contextMessage = summary
     ? `\n\nCONTEXTO FINANCEIRO ATUAL (${summary.month}):
-- Entradas recebidas: R$${summary.entradas.confirmado.toFixed(2)} de R$${summary.entradas.total.toFixed(2)} previsto
-- Despesas pagas: R$${summary.despesas.confirmado.toFixed(2)} de R$${summary.despesas.total.toFixed(2)} previsto
+- Saldo disponível em conta (acumulado): R$${(summary.saldoDisponivel || 0).toFixed(2)}
+- Entradas recebidas no mês: R$${summary.entradas.confirmado.toFixed(2)} de R$${summary.entradas.total.toFixed(2)} previsto
+- Despesas pagas no mês: R$${summary.despesas.confirmado.toFixed(2)} de R$${summary.despesas.total.toFixed(2)} previsto
 - Cartão/parcelas: R$${summary.cartao.total.toFixed(2)}
-- Saldo realizado: R$${summary.saldoRealizado.toFixed(2)}
-- Saldo previsto: R$${summary.saldoPrevisto.toFixed(2)}
+- Saldo realizado no mês: R$${summary.saldoRealizado.toFixed(2)}
+- Saldo previsto no mês: R$${summary.saldoPrevisto.toFixed(2)}
 - Total investido: R$${summary.investimentos.total.toFixed(2)}
+- Patrimônio líquido: R$${(summary.patrimonioLiquido || 0).toFixed(2)}
 - Pendente receber: ${summary.pendingEntradas.length} item(s)
 - Pendente pagar: ${summary.pendingDespesas.length} item(s)`
     : '';
