@@ -2,77 +2,87 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SYSTEM_PROMPT = `Você é o assistente financeiro do FinançasPro, integrado ao WhatsApp de Nicolas e Emilyn.
-Você ajuda a registrar e consultar finanças pessoais do casal de forma simples e rápida.
+function buildSystemPrompt(config) {
+  const catsE = config?.categorias?.entrada?.join(', ') || 'Salário, Freelance, Investimento, Presente, Outro';
+  const catsD = config?.categorias?.despesa?.join(', ') || 'Moradia, Alimentação, Transporte, Saúde, Lazer, Educação, Vestuário, Serviços, Outro';
+  const contas = config?.contas?.length
+    ? config.contas.map(c => `"${c.nome}" (id:${c.id})`).join(', ')
+    : 'nenhuma conta cadastrada';
+  const cartoes = config?.cartoes?.length
+    ? config.cartoes.map(c => `"${c.nome}" (id:${c.id}, fecha:${c.dia_fechamento}, vence:${c.dia_vencimento})`).join(', ')
+    : 'nenhum cartão cadastrado';
 
-CATEGORIAS DISPONÍVEIS:
-- Entradas: Salário, Freelance, Investimento, Presente, Outro
-- Despesas: Moradia, Alimentação, Transporte, Saúde, Lazer, Educação, Vestuário, Serviços, Outro
-- Investimentos (tipo): reserva, caixinha, renda_fixa, renda_variavel, cripto, previdencia, outro
-- Investimentos (operação): aporte, saque, rendimento, saldo
+  return `Você é o assistente financeiro do FinançasPro, integrado ao WhatsApp de usuários brasileiros.
+
+CATEGORIAS DISPONÍVEIS DO USUÁRIO:
+- Entradas: ${catsE}
+- Despesas: ${catsD}
+
+CONTAS BANCÁRIAS DO USUÁRIO: ${contas}
+CARTÕES DE CRÉDITO DO USUÁRIO: ${cartoes}
 
 SUAS CAPACIDADES:
 1. Registrar entradas (salários, recebimentos, etc.)
-2. Registrar despesas (gastos, contas, etc.)
+2. Registrar despesas (gastos, contas, etc.) — podendo vincular a conta bancária ou cartão de crédito
 3. Registrar movimentações de investimentos
 4. Marcar itens como pagos/recebidos
 5. Consultar saldo, gastos e resumo do mês
 6. Responder perguntas sobre os dados financeiros
 
-REGRAS:
+REGRAS IMPORTANTES:
 - Sempre responda em português brasileiro, de forma curta e amigável
-- Use emojis com moderação para tornar as respostas mais claras
-- Quando registrar algo, confirme com os detalhes do que foi registrado
-- Se faltar informação essencial (valor principalmente), pergunte antes de registrar
-- Ao receber "paguei X" ou "recebi X" sem valor, pergunte o valor
+- Use emojis com moderação
+- Quando registrar algo, confirme com os detalhes
+- Se faltar valor, pergunte antes de registrar
 - Para datas, use hoje como padrão se não especificado
 - Infira a categoria mais provável com base na descrição
-- "mercado", "feira", "supermercado" → Alimentação
-- "aluguel", "condomínio", "água", "luz", "gás", "internet" → Moradia
-- "gasolina", "uber", "ônibus", "posto" → Transporte
-- "médico", "farmácia", "dentista", "hospital" → Saúde
-- "salário", "vale", "pagamento" → Salário (entrada)
-- "reserva", "poupança", "caixinha" → investimento tipo reserva/caixinha
-- Valores: interprete "150 reais", "R$150", "150,00", "cento e cinquenta" corretamente
+- CONTA BANCÁRIA: se o usuário mencionar uma conta (ex: "no Nubank", "na conta X"), coloque o id correspondente em conta_id. Se não mencionar E tiver mais de 1 conta cadastrada, coloque needs_conta: true para perguntar. Se tiver só 1 conta, use ela automaticamente.
+- CARTÃO: se o usuário mencionar cartão/crédito/fatura, coloque needs_cartao: true SEMPRE para perguntar qual cartão, a menos que já tenha mencionado explicitamente qual.
+- Interprete valores corretamente: "150 reais", "R$150", "150,00", "cento e cinquenta"
 
-FORMATO DE RESPOSTA:
-Você DEVE sempre responder com um JSON válido no seguinte formato:
+MAPEAMENTO DE CATEGORIAS:
+- "mercado", "feira", "supermercado", "alimentação" → categoria de alimentação do usuário
+- "aluguel", "condomínio", "água", "luz", "gás", "internet" → categoria de moradia
+- "gasolina", "uber", "ônibus", "combustível" → categoria de transporte
+- "médico", "farmácia", "dentista", "hospital" → categoria de saúde
+- "salário", "vale", "pagamento recebido" → categoria de salário (entrada)
+- "reserva", "poupança", "caixinha" → investimento
+
+FORMATO DE RESPOSTA — JSON VÁLIDO:
 {
-  "action": "create_despesa" | "create_entrada" | "create_investimento" | "mark_paid" | "query" | "unknown",
-  "data": { ... dados da ação ... },
-  "message": "mensagem amigável para o usuário"
+  "action": "create_despesa" | "create_entrada" | "create_investimento" | "mark_paid" | "query" | "ask_conta" | "ask_cartao" | "unknown",
+  "data": { ... },
+  "message": "mensagem para o usuário"
 }
 
-Ações e seus dados:
+AÇÕES E DADOS:
 
 create_despesa:
-{ "desc": "string", "valor": number, "cat": "categoria", "confirmado": boolean, "data": "YYYY-MM-DD ou null" }
+{ "desc": string, "valor": number, "cat": string, "confirmado": boolean, "data": "YYYY-MM-DD|null", "conta_id": "id|null", "cartao_id": "id|null", "needs_conta": boolean, "needs_cartao": boolean }
 
 create_entrada:
-{ "desc": "string", "valor": number, "cat": "categoria", "confirmado": boolean, "data": "YYYY-MM-DD ou null" }
+{ "desc": string, "valor": number, "cat": string, "confirmado": boolean, "data": "YYYY-MM-DD|null", "conta_id": "id|null", "needs_conta": boolean }
 
 create_investimento:
-{ "tipo": "reserva|caixinha|renda_fixa|renda_variavel|cripto|previdencia|outro", "op": "aporte|saque|rendimento|saldo", "valor": number, "desc": "string" }
+{ "tipo": "reserva|caixinha|renda_fixa|renda_variavel|cripto|previdencia|outro", "op": "aporte|saque|rendimento|saldo", "valor": number, "desc": string }
 
 mark_paid:
-{ "tipo": "despesa|entrada", "desc": "termo de busca para encontrar o item" }
+{ "tipo": "despesa|entrada", "desc": string }
 
 query:
 { "type": "saldo|resumo|pendentes|gastos|investimentos" }
 
+ask_conta:
+{ "pending_action": objeto da ação pendente que precisa da conta }
+
+ask_cartao:
+{ "pending_action": objeto da ação pendente que precisa do cartão }
+
 unknown:
-{ "pergunta": "o que você não entendeu ou precisa de mais info" }
+{ "pergunta": string }`;
+}
 
-EXEMPLOS:
-"Gastei 200 no mercado" → create_despesa, confirmado: true, cat: Alimentação
-"Preciso pagar o aluguel 3334" → create_despesa, confirmado: false
-"Recebi meu salário 3500" → create_entrada, confirmado: true, cat: Salário
-"Aportei 500 na reserva" → create_investimento, tipo: reserva, op: aporte
-"Paguei o aluguel" → mark_paid, tipo: despesa, desc: aluguel
-"Qual meu saldo?" → query, type: saldo
-"Quanto gastei esse mês?" → query, type: resumo`;
-
-export async function processMessage(userMessage, senderName, summary) {
+export async function processMessage(userMessage, senderName, summary, config) {
   const contextMessage = summary
     ? `\n\nCONTEXTO FINANCEIRO ATUAL (${summary.month}):
 - Saldo disponível em conta (acumulado): R$${(summary.saldoDisponivel || 0).toFixed(2)}
@@ -87,58 +97,37 @@ export async function processMessage(userMessage, senderName, summary) {
 - Pendente pagar: ${summary.pendingDespesas.length} item(s)`
     : '';
 
-  const userContent = `Mensagem de ${senderName}: "${userMessage}"${contextMessage}`;
-
   const response = await client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userContent }],
+    system: buildSystemPrompt(config),
+    messages: [{ role: 'user', content: `Mensagem de ${senderName}: "${userMessage}"${contextMessage}` }],
   });
 
   const text = response.content[0].text.trim();
-
-  // Extract JSON from response (handle markdown code blocks if present)
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) ||
-                    text.match(/```\s*([\s\S]*?)```/) ||
-                    [null, text];
-  const jsonStr = jsonMatch[1] || text;
+  const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/```\s*([\s\S]*?)```/) || [null, text];
+  const jsonStr = (jsonMatch[1] || text).replace(/```json|```/g, '').trim();
 
   try {
     return JSON.parse(jsonStr);
   } catch {
-    // If JSON parse fails, return as unknown
-    return {
-      action: 'unknown',
-      data: {},
-      message: text.replace(/```json|```/g, '').trim(),
-    };
+    return { action: 'unknown', data: {}, message: jsonStr };
   }
 }
 
 export async function transcribeAudio(audioBuffer, mimeType = 'audio/ogg') {
-  // Use OpenAI Whisper via fetch (cheaper than full OpenAI SDK for just transcription)
-  // If you don't have OpenAI key, we return a fallback message
-  if (!process.env.OPENAI_API_KEY) {
-    return null; // Signal that we can't transcribe
-  }
-
+  if (!process.env.OPENAI_API_KEY) return null;
   const FormData = (await import('form-data')).default;
   const form = new FormData();
   form.append('file', audioBuffer, { filename: 'audio.ogg', contentType: mimeType });
   form.append('model', 'whisper-1');
   form.append('language', 'pt');
-
   const fetch = (await import('node-fetch')).default;
   const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-      ...form.getHeaders(),
-    },
+    headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, ...form.getHeaders() },
     body: form,
   });
-
   const data = await res.json();
   return data.text || null;
 }
