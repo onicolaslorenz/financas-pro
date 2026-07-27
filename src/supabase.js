@@ -5,25 +5,48 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// ── Helpers ────────────────────────────────────────────────────────────────
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
-
 function todayStr() {
   return new Date().toISOString().split('T')[0];
 }
-
 function activeMonth() {
   const n = new Date();
   return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`;
 }
 
-// ── READ ───────────────────────────────────────────────────────────────────
+// ── Load user config (categorias, contas, cartões) ─────────────────────────
+export async function getUserConfig(userId) {
+  const [catRes, contaRes, cartaoRes] = await Promise.all([
+    supabase.from('categorias').select('*').eq('user_id', userId).order('ordem'),
+    supabase.from('contas').select('*').eq('user_id', userId).eq('ativa', true).order('ordem'),
+    supabase.from('cartoes').select('*').eq('user_id', userId).eq('ativo', true).order('ordem'),
+  ]);
+  return {
+    categorias: {
+      entrada: (catRes.data || []).filter(c => c.tipo === 'entrada').map(c => c.nome),
+      despesa: (catRes.data || []).filter(c => c.tipo === 'despesa').map(c => c.nome),
+    },
+    contas: (contaRes.data || []).map(c => ({ id: c.id, nome: c.nome, cor: c.cor, saldo_inicial: c.saldo_inicial })),
+    cartoes: (cartaoRes.data || []).map(c => ({ id: c.id, nome: c.nome, bandeira: c.bandeira, limite: c.limite, dia_fechamento: c.dia_fechamento, dia_vencimento: c.dia_vencimento })),
+  };
+}
 
-// ── Saldo acumulado (replicates frontend getSaldoAcumulado) ────────────────
-// Soma todas entradas confirmadas - despesas confirmadas - parcelas vencidas
-// desde sempre até o mês atual, independente do mês selecionado
+// ── Resolve conta/cartão by name mention ──────────────────────────────────
+export function resolveContaByName(mention, contas) {
+  if (!mention || !contas.length) return null;
+  const m = mention.toLowerCase();
+  return contas.find(c => c.nome.toLowerCase().includes(m) || m.includes(c.nome.toLowerCase())) || null;
+}
+
+export function resolveCartaoByName(mention, cartoes) {
+  if (!mention || !cartoes.length) return null;
+  const m = mention.toLowerCase();
+  return cartoes.find(c => c.nome.toLowerCase().includes(m) || m.includes(c.nome.toLowerCase())) || null;
+}
+
+// ── Saldo acumulado ────────────────────────────────────────────────────────
 function calcSaldoAcumulado(entradas, despesas, cartao) {
   const hoje = new Date();
   const anoAtual = hoje.getFullYear();
@@ -38,6 +61,7 @@ function calcSaldoAcumulado(entradas, despesas, cartao) {
       const [oy, om] = origemYM.split('-').map(Number);
       const startIdx = oy * 12 + om - 1;
       for (let idx = startIdx; idx <= curIdx; idx++) {
+        if (e.repeticoes && (idx - startIdx) >= parseInt(e.repeticoes)) break;
         const y = Math.floor(idx / 12);
         const m = (idx % 12) + 1;
         const ym = `${y}-${String(m).padStart(2, '0')}`;
@@ -56,6 +80,7 @@ function calcSaldoAcumulado(entradas, despesas, cartao) {
       const [oy, om] = origemYM.split('-').map(Number);
       const startIdx = oy * 12 + om - 1;
       for (let idx = startIdx; idx <= curIdx; idx++) {
+        if (e.repeticoes && (idx - startIdx) >= parseInt(e.repeticoes)) break;
         const y = Math.floor(idx / 12);
         const m = (idx % 12) + 1;
         const ym = `${y}-${String(m).padStart(2, '0')}`;
@@ -79,11 +104,42 @@ function calcSaldoAcumulado(entradas, despesas, cartao) {
   return totalE - totalD - totalP;
 }
 
+function filterItemsForMonth(list, ym) {
+  return list.filter(item => {
+    const itemDate = item.data_lancamento || '';
+    if (item.recorrente) return itemDate.slice(0, 7) <= ym;
+    return itemDate.startsWith(ym);
+  });
+}
+
+function isConfirmed(item, ym) {
+  if (item.recorrente) return !!(item.status_map && item.status_map[ym]);
+  return !!item.confirmado;
+}
+
+function calcInvTotal(investimentos) {
+  const tipos = ['reserva', 'caixinha', 'renda_fixa', 'renda_variavel', 'cripto', 'previdencia', 'outro'];
+  const porTipo = {};
+  tipos.forEach(t => { porTipo[t] = 0; });
+  tipos.forEach(tipo => {
+    const movs = investimentos.filter(i => i.tipo === tipo).sort((a, b) => a.mes > b.mes ? 1 : -1);
+    let base = 0, baseDate = '';
+    movs.forEach(m => { if (m.op === 'saldo') { base = parseFloat(m.valor); baseDate = m.mes; } });
+    movs.forEach(m => {
+      if (m.op === 'saldo') return;
+      if (m.mes < baseDate) return;
+      if (m.op === 'aporte' || m.op === 'rendimento') base += parseFloat(m.valor);
+      if (m.op === 'saque') base -= parseFloat(m.valor);
+    });
+    porTipo[tipo] = Math.max(0, base);
+  });
+  return { total: Object.values(porTipo).reduce((s, v) => s + v, 0), porTipo };
+}
+
 export async function getMonthSummary(userId, month = null) {
   const ym = month || activeMonth();
   const [y, m] = ym.split('-').map(Number);
 
-  // Fetch all entries (we filter recorrente in memory, same logic as frontend)
   const [{ data: entradas }, { data: despesas }, { data: cartao }, { data: investimentos }] = await Promise.all([
     supabase.from('entradas').select('*').eq('user_id', userId),
     supabase.from('despesas').select('*').eq('user_id', userId),
@@ -91,11 +147,8 @@ export async function getMonthSummary(userId, month = null) {
     supabase.from('investimentos').select('*').eq('user_id', userId),
   ]);
 
-  // Filter entradas for the month (same recorrente logic as frontend)
   const monthEntradas = filterItemsForMonth(entradas || [], ym);
   const monthDespesas = filterItemsForMonth(despesas || [], ym);
-
-  // Filter cartao parcelas for month
   const monthParcelas = (cartao || []).filter(c => {
     const [cy, cm] = c.inicio.split('-').map(Number);
     const startIdx = cy * 12 + cm - 1;
@@ -106,17 +159,11 @@ export async function getMonthSummary(userId, month = null) {
   const totalE = monthEntradas.reduce((s, e) => s + parseFloat(e.valor), 0);
   const totalD = monthDespesas.reduce((s, e) => s + parseFloat(e.valor), 0);
   const totalP = monthParcelas.reduce((s, e) => s + e._val, 0);
-
   const confirmedE = monthEntradas.filter(e => isConfirmed(e, ym)).reduce((s, e) => s + parseFloat(e.valor), 0);
   const confirmedD = monthDespesas.filter(e => isConfirmed(e, ym)).reduce((s, e) => s + parseFloat(e.valor), 0);
-
   const pendingEntradas = monthEntradas.filter(e => !isConfirmed(e, ym));
   const pendingDespesas = monthDespesas.filter(e => !isConfirmed(e, ym));
-
-  // Investment summary
   const invTotal = calcInvTotal(investimentos || []);
-
-  // Saldo acumulado (disponível em conta — independente do mês selecionado)
   const saldoDisponivel = calcSaldoAcumulado(entradas, despesas, cartao);
 
   return {
@@ -134,48 +181,6 @@ export async function getMonthSummary(userId, month = null) {
   };
 }
 
-function filterItemsForMonth(list, ym) {
-  return list.filter(item => {
-    const itemDate = item.data_lancamento || '';
-    if (item.recorrente) {
-      return itemDate.slice(0, 7) <= ym;
-    }
-    return itemDate.startsWith(ym);
-  });
-}
-
-function isConfirmed(item, ym) {
-  if (item.recorrente) {
-    return !!(item.status_map && item.status_map[ym]);
-  }
-  return !!item.confirmado;
-}
-
-function calcInvTotal(investimentos) {
-  const tipos = ['reserva', 'caixinha', 'renda_fixa', 'renda_variavel', 'cripto', 'previdencia', 'outro'];
-  const porTipo = {};
-  tipos.forEach(t => { porTipo[t] = 0; });
-
-  // For each tipo, find last saldo update + flow movements after it
-  tipos.forEach(tipo => {
-    const movs = investimentos.filter(i => i.tipo === tipo).sort((a, b) => a.mes > b.mes ? 1 : -1);
-    let base = 0, baseDate = '';
-    movs.forEach(m => {
-      if (m.op === 'saldo') { base = parseFloat(m.valor); baseDate = m.mes; }
-    });
-    movs.forEach(m => {
-      if (m.op === 'saldo') return;
-      if (m.mes < baseDate) return;
-      if (m.op === 'aporte' || m.op === 'rendimento') base += parseFloat(m.valor);
-      if (m.op === 'saque') base -= parseFloat(m.valor);
-    });
-    porTipo[tipo] = Math.max(0, base);
-  });
-
-  const total = Object.values(porTipo).reduce((s, v) => s + v, 0);
-  return { total, porTipo };
-}
-
 export async function getRecentTransactions(userId, limit = 10) {
   const ym = activeMonth();
   const [{ data: entradas }, { data: despesas }] = await Promise.all([
@@ -189,35 +194,24 @@ export async function getRecentTransactions(userId, limit = 10) {
 }
 
 // ── WRITE ──────────────────────────────────────────────────────────────────
-
-export async function createEntrada({ userId, desc, valor, cat = 'Outro', data = null, recorrente = false, confirmado = false }) {
+export async function createEntrada({ userId, desc, valor, cat = 'Outro', data = null, recorrente = false, confirmado = false, conta_id = null }) {
   const row = {
-    id: genId(),
-    user_id: userId,
-    descricao: desc,
-    valor: parseFloat(valor),
-    data_lancamento: data || todayStr(),
-    cat,
-    recorrente,
-    confirmado,
-    status_map: {},
+    id: genId(), user_id: userId, descricao: desc,
+    valor: parseFloat(valor), data_lancamento: data || todayStr(),
+    cat, recorrente, confirmado, status_map: {},
+    conta_id: conta_id || null,
   };
   const { error } = await supabase.from('entradas').insert(row);
   if (error) throw error;
   return row;
 }
 
-export async function createDespesa({ userId, desc, valor, cat = 'Outro', data = null, recorrente = false, confirmado = false }) {
+export async function createDespesa({ userId, desc, valor, cat = 'Outro', data = null, recorrente = false, confirmado = false, conta_id = null, cartao_id = null }) {
   const row = {
-    id: genId(),
-    user_id: userId,
-    descricao: desc,
-    valor: parseFloat(valor),
-    data_lancamento: data || todayStr(),
-    cat,
-    recorrente,
-    confirmado,
-    status_map: {},
+    id: genId(), user_id: userId, descricao: desc,
+    valor: parseFloat(valor), data_lancamento: data || todayStr(),
+    cat, recorrente, confirmado, status_map: {},
+    conta_id: conta_id || null, cartao_id: cartao_id || null,
   };
   const { error } = await supabase.from('despesas').insert(row);
   if (error) throw error;
@@ -226,15 +220,9 @@ export async function createDespesa({ userId, desc, valor, cat = 'Outro', data =
 
 export async function createInvestimento({ userId, tipo, op, valor, desc = '', mes = null }) {
   const row = {
-    id: genId(),
-    user_id: userId,
-    tipo,
-    op,
-    valor: parseFloat(valor),
-    data_lancamento: todayStr(),
-    descricao: desc,
-    mes: mes || activeMonth(),
-    linked_id: null,
+    id: genId(), user_id: userId, tipo, op,
+    valor: parseFloat(valor), data_lancamento: todayStr(),
+    descricao: desc, mes: mes || activeMonth(), linked_id: null,
   };
   const { error } = await supabase.from('investimentos').insert(row);
   if (error) throw error;
@@ -242,27 +230,14 @@ export async function createInvestimento({ userId, tipo, op, valor, desc = '', m
 }
 
 export async function markAsPaid({ userId, tipo, descSearch }) {
-  // Find the most recent matching item and mark as confirmed
   const table = tipo === 'entrada' ? 'entradas' : 'despesas';
   const ym = activeMonth();
-
-  const { data } = await supabase
-    .from(table)
-    .select('*')
-    .eq('user_id', userId)
-    .ilike('descricao', `%${descSearch}%`)
-    .order('data_lancamento', { ascending: false })
-    .limit(5);
-
+  const { data } = await supabase.from(table).select('*').eq('user_id', userId).ilike('descricao', `%${descSearch}%`).order('data_lancamento', { ascending: false }).limit(5);
   if (!data || !data.length) return null;
-
-  // Find best match in current month or most recent
   const item = data.find(i => (i.data_lancamento || '').startsWith(ym)) || data[0];
-
   const updateData = item.recorrente
     ? { status_map: { ...(item.status_map || {}), [ym]: true } }
     : { confirmado: true };
-
   const { error } = await supabase.from(table).update(updateData).eq('id', item.id);
   if (error) throw error;
   return { ...item, ...updateData };
