@@ -195,4 +195,57 @@ app.listen(PORT, () => {
   console.log(`✅ FinançasPro Bot running on port ${PORT}`);
   console.log(`📡 Webhook: POST /webhook`);
   console.log(`🧪 Test: POST /test`);
+  startKeepAlive();
 });
+
+// ── Keep-alive: ping Evolution API every 4 minutes ────────────────────────
+// Prevents Railway free tier containers from sleeping and losing WhatsApp session
+function startKeepAlive() {
+  const EVOLUTION_URL = process.env.EVOLUTION_API_URL;
+  const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY;
+  const INSTANCE = process.env.EVOLUTION_INSTANCE || 'financaspro';
+  const SELF_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : null;
+
+  if (!EVOLUTION_URL) {
+    console.log('⚠️ Keep-alive: EVOLUTION_API_URL not set, skipping.');
+    return;
+  }
+
+  const ping = async () => {
+    try {
+      // Ping Evolution API — check instance status
+      const res = await fetch(`${EVOLUTION_URL}/instance/fetchInstances`, {
+        headers: { 'apikey': EVOLUTION_KEY },
+        signal: AbortSignal.timeout(10000),
+      });
+      const data = await res.json();
+      const instance = Array.isArray(data)
+        ? data.find(i => i.instance?.instanceName === INSTANCE || i.name === INSTANCE)
+        : null;
+      const state = instance?.instance?.state || instance?.state || 'unknown';
+
+      if (state !== 'open') {
+        console.log(`⚠️ Keep-alive: instance state = "${state}" — may need reconnect`);
+      } else {
+        console.log(`✅ Keep-alive: Evolution connected (${new Date().toLocaleTimeString('pt-BR')})`);
+      }
+    } catch (e) {
+      console.log(`⚠️ Keep-alive ping failed: ${e.message}`);
+    }
+
+    // Also self-ping to keep this container awake
+    if (SELF_URL) {
+      fetch(`${SELF_URL}/`, { signal: AbortSignal.timeout(5000) }).catch(() => {});
+    }
+  };
+
+  // First ping after 30s, then every 4 minutes
+  setTimeout(() => {
+    ping();
+    setInterval(ping, 4 * 60 * 1000);
+  }, 30000);
+
+  console.log('🔁 Keep-alive started — pinging every 4 minutes');
+}
