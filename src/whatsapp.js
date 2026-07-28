@@ -43,12 +43,11 @@ export async function sendTextMessage(phone, text) {
   const instance = process.env.EVOLUTION_INSTANCE || 'financaspro';
   const client = evolutionClient();
 
-  // Normalize phone - Evolution API accepts number without @s.whatsapp.net
   const normalized = phone.replace(/\D/g, '');
   const number = normalized.startsWith('55') ? normalized : `55${normalized}`;
 
   await client.post(`/message/sendText/${instance}`, {
-    number,
+    number: `${number}@s.whatsapp.net`,
     text,
   });
 }
