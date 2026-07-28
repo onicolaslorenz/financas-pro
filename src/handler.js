@@ -3,7 +3,7 @@ import {
   getMonthSummary, getRecentTransactions,
   createEntrada, createDespesa, createInvestimento, markAsPaid,
 } from './supabase.js';
-import { sendTextMessage, downloadMedia, sendTyping } from './whatsapp.js';
+import { sendTextMessage, sendTyping } from './whatsapp.js';
 
 function fmt(v) {
   return `R$${Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -24,15 +24,15 @@ const INV_OP_LABELS = {
   aporte: 'Aporte', saque: 'Saque', rendimento: 'Rendimento', saldo: 'Atualiz. Saldo',
 };
 
-export async function handleMessage({ phone, messageType, text, messageKey, senderName, userId }) {
+export async function handleMessage({ phone, messageType, text, audioBuffer, messageKey, senderName, userId }) {
   try {
     await sendTyping(phone, 1500);
     let userText = text;
 
-    if (messageType === 'audioMessage' || messageType === 'pttMessage') {
-      const audioBuffer = await downloadMedia(messageKey);
-      if (audioBuffer) {
-        const transcribed = await transcribeAudio(audioBuffer);
+    if (audioBuffer || messageType === 'audioMessage' || messageType === 'pttMessage') {
+      const buffer = audioBuffer;
+      if (buffer) {
+        const transcribed = await transcribeAudio(buffer);
         if (transcribed) {
           userText = transcribed;
           await sendTextMessage(phone, `🎙️ _Entendi: "${transcribed}"_`);
@@ -42,7 +42,7 @@ export async function handleMessage({ phone, messageType, text, messageKey, send
           return;
         }
       } else {
-        await sendTextMessage(phone, 'Não consegui baixar o áudio. Tente em texto.');
+        await sendTextMessage(phone, 'Não consegui processar o áudio. Tente em texto.');
         return;
       }
     }
