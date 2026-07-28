@@ -1,14 +1,12 @@
 import axios from 'axios';
 
-// ── User mapping ───────────────────────────────────────────────────────────
-// Parse WHATSAPP_USERS env: "phone:userId:name,phone:userId:name"
+// ── User mapping (fallback for hardcoded numbers) ─────────────────────────
 function parseUsers() {
   const raw = process.env.WHATSAPP_USERS || '';
   const map = {};
   raw.split(',').forEach(entry => {
     const [phone, userId, name] = entry.trim().split(':');
     if (phone && userId) {
-      // Normalize: remove +, spaces, dashes
       const normalized = phone.replace(/\D/g, '');
       map[normalized] = { userId, name: name || 'Usuário' };
     }
@@ -20,7 +18,6 @@ let userMap = null;
 export function getUserByPhone(phone) {
   if (!userMap) userMap = parseUsers();
   const normalized = phone.replace(/\D/g, '').replace(/^0/, '');
-  // Try with and without country code
   return userMap[normalized] ||
          userMap[`55${normalized}`] ||
          userMap[normalized.replace(/^55/, '')] ||
