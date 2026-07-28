@@ -1,73 +1,128 @@
-import axios from 'axios';
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  jidNormalizedUser,
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import pino from 'pino';
+import { mkdir } from 'fs/promises';
+import { existsSync } from 'fs';
 
-// ── User mapping (fallback for hardcoded numbers) ─────────────────────────
-function parseUsers() {
-  const raw = process.env.WHATSAPP_USERS || '';
-  const map = {};
-  raw.split(',').forEach(entry => {
-    const [phone, userId, name] = entry.trim().split(':');
-    if (phone && userId) {
-      const normalized = phone.replace(/\D/g, '');
-      map[normalized] = { userId, name: name || 'Usuário' };
+// ── State ──────────────────────────────────────────────────────────────────
+let sock = null;
+let isConnected = false;
+let messageHandler = null;
+const AUTH_DIR = './auth_info_baileys';
+
+// ── Initialize Baileys ─────────────────────────────────────────────────────
+export async function initWhatsApp(onMessage) {
+  messageHandler = onMessage;
+  await mkdir(AUTH_DIR, { recursive: true });
+  await connect();
+}
+
+async function connect() {
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version } = await fetchLatestBaileysVersion();
+
+  const logger = pino({ level: 'silent' });
+
+  sock = makeWASocket({
+    version,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    logger,
+    printQRInTerminal: true,
+    browser: ['FinançasPro', 'Chrome', '1.0.0'],
+    getMessage: async () => ({ conversation: '' }),
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      console.log('\n📱 ESCANEIE O QR CODE ACIMA COM O WHATSAPP DO NÚMERO 6534\n');
+    }
+
+    if (connection === 'open') {
+      isConnected = true;
+      console.log('✅ WhatsApp conectado via Baileys!');
+    }
+
+    if (connection === 'close') {
+      isConnected = false;
+      const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      const shouldReconnect = code !== DisconnectReason.loggedOut;
+      console.log(`⚠️ Conexão fechada (código ${code}). Reconectando: ${shouldReconnect}`);
+      if (shouldReconnect) {
+        setTimeout(connect, 3000);
+      } else {
+        console.log('🔴 Sessão encerrada. Apague a pasta auth_info_baileys e reinicie.');
+      }
     }
   });
-  return map;
-}
 
-let userMap = null;
-export function getUserByPhone(phone) {
-  if (!userMap) userMap = parseUsers();
-  const normalized = phone.replace(/\D/g, '').replace(/^0/, '');
-  return userMap[normalized] ||
-         userMap[`55${normalized}`] ||
-         userMap[normalized.replace(/^55/, '')] ||
-         null;
-}
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      if (msg.key.fromMe) continue;
+      if (!msg.message) continue;
 
-// ── Evolution API client ───────────────────────────────────────────────────
-function evolutionClient() {
-  return axios.create({
-    baseURL: process.env.EVOLUTION_API_URL,
-    headers: {
-      'apikey': process.env.EVOLUTION_API_KEY,
-      'Content-Type': 'application/json',
-    },
-    timeout: 30000,
+      const phone = msg.key.remoteJid?.replace('@s.whatsapp.net', '').replace('@g.us', '');
+      if (!phone) continue;
+      if (msg.key.remoteJid?.includes('@g.us')) continue;
+
+      const messageType = Object.keys(msg.message)[0];
+      let text = null;
+      let audioBuffer = null;
+
+      if (messageType === 'conversation') {
+        text = msg.message.conversation;
+      } else if (messageType === 'extendedTextMessage') {
+        text = msg.message.extendedTextMessage?.text;
+      } else if (messageType === 'audioMessage' || messageType === 'pttMessage') {
+        try {
+          const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+          audioBuffer = await downloadMediaMessage(msg, 'buffer', {});
+        } catch(e) {
+          console.error('Audio download error:', e.message);
+        }
+      } else {
+        continue;
+      }
+
+      if (messageHandler) {
+        messageHandler({ phone, text, audioBuffer, messageType, raw: msg })
+          .catch(err => console.error('Message handler error:', err));
+      }
+    }
   });
 }
 
+// ── Send message ───────────────────────────────────────────────────────────
 export async function sendTextMessage(phone, text) {
-  const instance = process.env.EVOLUTION_INSTANCE || 'financaspro';
-  const client = evolutionClient();
-
-  const normalized = phone.replace(/\D/g, '');
-  const number = normalized.startsWith('55') ? normalized : `55${normalized}`;
-
-  await client.post(`/message/sendText/${instance}`, {
-    number: `${number}@s.whatsapp.net`,
-    text,
-  });
-}
-
-export async function downloadMedia(messageKey, instance) {
-  const client = evolutionClient();
-  const inst = instance || process.env.EVOLUTION_INSTANCE || 'financaspro';
-  const res = await client.post(`/chat/getBase64FromMediaMessage/${inst}`, {
-    message: messageKey,
-    convertToMp4: false,
-  });
-  return res.data?.base64 ? Buffer.from(res.data.base64, 'base64') : null;
+  if (!sock || !isConnected) {
+    console.error('WhatsApp not connected');
+    return;
+  }
+  const jid = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@s.whatsapp.net`;
+  await sock.sendMessage(jid, { text });
 }
 
 export async function sendTyping(phone, duration = 2000) {
+  if (!sock || !isConnected) return;
   try {
-    const instance = process.env.EVOLUTION_INSTANCE || 'financaspro';
-    const client = evolutionClient();
-    const normalized = phone.replace(/\D/g, '');
-    const number = normalized.startsWith('55') ? normalized : `55${normalized}`;
-    await client.post(`/chat/sendPresence/${instance}`, {
-      number: `${number}@s.whatsapp.net`,
-      options: { presence: 'composing', delay: duration },
-    });
-  } catch { /* non-critical */ }
+    const jid = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@s.whatsapp.net`;
+    await sock.sendPresenceUpdate('composing', jid);
+    await new Promise(r => setTimeout(r, duration));
+    await sock.sendPresenceUpdate('paused', jid);
+  } catch(e) { /* non-critical */ }
+}
+
+export function getConnectionStatus() {
+  return isConnected;
 }
