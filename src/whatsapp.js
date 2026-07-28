@@ -3,17 +3,17 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import { mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
+import QRCode from 'qrcode';
 
 // ── State ──────────────────────────────────────────────────────────────────
 let sock = null;
 let isConnected = false;
 let messageHandler = null;
+let currentQR = null;
 const AUTH_DIR = './auth_info_baileys';
 
 // ── Initialize Baileys ─────────────────────────────────────────────────────
@@ -26,7 +26,6 @@ export async function initWhatsApp(onMessage) {
 async function connect() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
-
   const logger = pino({ level: 'silent' });
 
   sock = makeWASocket({
@@ -36,7 +35,7 @@ async function connect() {
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     logger,
-    printQRInTerminal: true,
+    printQRInTerminal: false,
     browser: ['FinançasPro', 'Chrome', '1.0.0'],
     getMessage: async () => ({ conversation: '' }),
   });
@@ -45,11 +44,16 @@ async function connect() {
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-      console.log('\n📱 ESCANEIE O QR CODE ACIMA COM O WHATSAPP DO NÚMERO 6534\n');
+      currentQR = qr;
+      console.log('📱 QR code gerado! Acesse /qr no browser para escanear.');
+      // Also print as text
+      const { default: qrTerminal } = await import('qrcode-terminal');
+      qrTerminal.generate(qr, { small: true });
     }
 
     if (connection === 'open') {
       isConnected = true;
+      currentQR = null;
       console.log('✅ WhatsApp conectado via Baileys!');
     }
 
@@ -61,7 +65,9 @@ async function connect() {
       if (shouldReconnect) {
         setTimeout(connect, 3000);
       } else {
-        console.log('🔴 Sessão encerrada. Apague a pasta auth_info_baileys e reinicie.');
+        currentQR = null;
+        console.log('🔴 Sessão encerrada. Acesse /qr para reconectar.');
+        setTimeout(connect, 5000);
       }
     }
   });
@@ -106,17 +112,21 @@ async function connect() {
 // ── Send message ───────────────────────────────────────────────────────────
 export async function sendTextMessage(phone, text) {
   if (!sock || !isConnected) {
-    console.error('WhatsApp not connected');
+    console.error('WhatsApp not connected — message not sent');
     return;
   }
-  const jid = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@s.whatsapp.net`;
+  const normalized = phone.replace(/\D/g, '');
+  const number = normalized.startsWith('55') ? normalized : `55${normalized}`;
+  const jid = `${number}@s.whatsapp.net`;
   await sock.sendMessage(jid, { text });
 }
 
 export async function sendTyping(phone, duration = 2000) {
   if (!sock || !isConnected) return;
   try {
-    const jid = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@s.whatsapp.net`;
+    const normalized = phone.replace(/\D/g, '');
+    const number = normalized.startsWith('55') ? normalized : `55${normalized}`;
+    const jid = `${number}@s.whatsapp.net`;
     await sock.sendPresenceUpdate('composing', jid);
     await new Promise(r => setTimeout(r, duration));
     await sock.sendPresenceUpdate('paused', jid);
@@ -125,4 +135,10 @@ export async function sendTyping(phone, duration = 2000) {
 
 export function getConnectionStatus() {
   return isConnected;
+}
+
+// ── QR endpoint helper ─────────────────────────────────────────────────────
+export async function getQRCode() {
+  if (!currentQR) return null;
+  return await QRCode.toDataURL(currentQR);
 }
