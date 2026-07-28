@@ -2,62 +2,54 @@ import 'dotenv/config';
 import express from 'express';
 import { getUserByPhoneDB, getSession, setSession, clearSession, generateCode, verifyCode, sendVerificationEmail } from './auth.js';
 import { handleMessage } from './handler.js';
-import { sendTextMessage, sendTyping, setupWebhook, getInstanceStatus } from './whatsapp.js';
+import { sendTextMessage, sendTyping, downloadMedia } from './whatsapp.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true })); // Twilio sends form-encoded webhooks
 
 // ── Health check ───────────────────────────────────────────────────────────
-app.get('/', async (req, res) => {
-  const status = await getInstanceStatus();
-  res.json({
-    status: 'ok',
-    service: 'FinançasPro Bot',
-    whatsapp: status,
-    timestamp: new Date().toISOString(),
-  });
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'FinançasPro Bot (Twilio)', timestamp: new Date().toISOString() });
 });
 
-// ── Webhook from Evolution API ─────────────────────────────────────────────
+// ── Twilio WhatsApp Webhook ────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200);
+  // Twilio expects TwiML response (can be empty)
+  res.set('Content-Type', 'text/xml');
+  res.send('<Response></Response>');
+
   try {
     const body = req.body;
-    const event = body.event || body.type;
-    if (event !== 'messages.upsert' && event !== 'message') return;
+    // Twilio sends: From, Body, MediaUrl0, MediaContentType0
+    const from = body.From; // e.g. "whatsapp:+554796145244"
+    const text = body.Body || '';
+    const mediaUrl = body.MediaUrl0 || null;
+    const mediaType = body.MediaContentType0 || '';
 
-    const messageData = body.data || body;
-    const messages = messageData.messages || (messageData.key ? [messageData] : []);
+    if (!from) return;
 
-    for (const msg of messages) {
-      if (msg.key?.fromMe) continue;
-      const phone = msg.key?.remoteJid?.replace('@s.whatsapp.net', '').replace('@g.us', '');
-      if (!phone || msg.key?.remoteJid?.includes('@g.us')) continue;
+    // Extract phone number
+    const phone = from.replace('whatsapp:+', '').replace('+', '');
+    console.log(`📨 ${phone}: ${text || '[media]'}`);
 
-      const messageType = msg.message ? Object.keys(msg.message)[0] : null;
-      let text = null;
-      let messageKey = null;
+    // Determine message type
+    let messageType = 'conversation';
+    let audioBuffer = null;
 
-      if (messageType === 'conversation') {
-        text = msg.message.conversation;
-      } else if (messageType === 'extendedTextMessage') {
-        text = msg.message.extendedTextMessage?.text;
-      } else if (messageType === 'audioMessage' || messageType === 'pttMessage') {
-        messageKey = { key: msg.key, message: msg.message };
-      } else {
-        continue;
-      }
-
-      console.log(`📨 ${phone}: ${text || '[audio]'}`);
-      processIncoming({ phone, messageType, text, messageKey }).catch(console.error);
+    if (mediaUrl && mediaType.startsWith('audio/')) {
+      messageType = 'audioMessage';
+      audioBuffer = await downloadMedia(mediaUrl);
     }
+
+    processIncoming({ phone, messageType, text, audioBuffer }).catch(console.error);
   } catch(e) {
     console.error('Webhook error:', e.message);
   }
 });
 
-// ── Message router ────────────────────────────────────────────────────────
-async function processIncoming({ phone, messageType, text, messageKey }) {
+// ── Message router ─────────────────────────────────────────────────────────
+async function processIncoming({ phone, messageType, text, audioBuffer }) {
   const session = getSession(phone);
 
   if (session.state === 'awaiting_code') {
@@ -117,46 +109,12 @@ async function processIncoming({ phone, messageType, text, messageKey }) {
     return;
   }
 
-  handleMessage({ phone, messageType, text, messageKey, senderName: user.name, userId: user.userId })
+  handleMessage({ phone, messageType, text, audioBuffer, messageKey: null, senderName: user.name, userId: user.userId })
     .catch(console.error);
-}
-
-// ── Keep-alive ─────────────────────────────────────────────────────────────
-function startKeepAlive() {
-  const SELF = process.env.RAILWAY_PUBLIC_DOMAIN
-    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null;
-
-  const ping = async () => {
-    const status = await getInstanceStatus();
-    if (status === 'open') {
-      console.log(`✅ Keep-alive: WhatsApp connected (${new Date().toLocaleTimeString('pt-BR')})`);
-    } else {
-      console.log(`⚠️ Keep-alive: status = "${status}"`);
-      // Auto-reconfigure webhook if connected but webhook may have dropped
-      if (status === 'open' && SELF) {
-        await setupWebhook(`${SELF}/webhook`).catch(() => {});
-      }
-    }
-    if (SELF) fetch(`${SELF}/`, { signal: AbortSignal.timeout(5000) }).catch(() => {});
-  };
-
-  setTimeout(() => { ping(); setInterval(ping, 4 * 60 * 1000); }, 30000);
-  console.log('🔁 Keep-alive started');
 }
 
 // ── Start ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  console.log(`✅ FinançasPro Bot running on port ${PORT}`);
-
-  // Auto-configure webhook on startup
-  const SELF = process.env.RAILWAY_PUBLIC_DOMAIN
-    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null;
-  if (SELF) {
-    setTimeout(async () => {
-      await setupWebhook(`${SELF}/webhook`);
-    }, 5000);
-  }
-
-  startKeepAlive();
+app.listen(PORT, () => {
+  console.log(`✅ FinançasPro Bot (Twilio) running on port ${PORT}`);
 });
