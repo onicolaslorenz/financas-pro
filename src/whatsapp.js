@@ -131,15 +131,17 @@ async function connect() {
       if (connection === 'close') {
         isConnected = false;
         const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
-        const shouldReconnect = code !== DisconnectReason.loggedOut;
-        console.log(`⚠️ Conexão fechada (código ${code}). Reconectando: ${shouldReconnect}`);
-        if (shouldReconnect) {
-          setTimeout(connect, 5000);
-        } else {
-          // Logged out — clear session from Supabase
-          console.log('🔴 Sessão encerrada. Limpando e reconectando...');
+        console.log(`⚠️ Conexão fechada (código ${code}).`);
+
+        // Codes 500/515 = bad session, clear and start fresh
+        if (code === 500 || code === 515 || code === DisconnectReason.loggedOut) {
+          console.log('🧹 Limpando sessão corrompida do Supabase...');
           await supabase.from('baileys_sessions').delete().like('id', 'financaspro:%');
+          console.log('✅ Sessão limpa. Reconectando para gerar novo QR...');
           setTimeout(connect, 3000);
+        } else {
+          console.log('Reconectando...');
+          setTimeout(connect, 5000);
         }
       }
     });
