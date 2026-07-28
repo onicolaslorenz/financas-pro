@@ -1,96 +1,88 @@
 import Anthropic from '@anthropic-ai/sdk';
-
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SYSTEM_PROMPT = `Você é o assistente financeiro do FinançasPro, integrado ao WhatsApp de Nicolas e Emilyn.
-Você ajuda a registrar e consultar finanças pessoais do casal de forma simples e rápida.
+function buildSystemPrompt(config) {
+  const catsE = config?.categorias?.entrada?.join(', ') || 'Salário, Freelance, Investimento, Presente, Outro';
+  const catsD = config?.categorias?.despesa?.join(', ') || 'Moradia, Alimentação, Transporte, Saúde, Lazer, Educação, Vestuário, Serviços, Outro';
+  const contas = config?.contas?.length ? config.contas.map((c,i) => `${i+1}. ${c.nome} (id:${c.id})`).join(', ') : 'nenhuma conta cadastrada';
+  const cartoes = config?.cartoes?.length ? config.cartoes.map((c,i) => `${i+1}. ${c.nome} (id:${c.id})`).join(', ') : 'nenhum cartão cadastrado';
 
-CATEGORIAS DISPONÍVEIS:
-- Entradas: Salário, Freelance, Investimento, Presente, Outro
-- Despesas: Moradia, Alimentação, Transporte, Saúde, Lazer, Educação, Vestuário, Serviços, Outro
-- Investimentos (tipo): reserva, caixinha, renda_fixa, renda_variavel, cripto, previdencia, outro
-- Investimentos (operação): aporte, saque, rendimento, saldo
+  return `Você é o assistente financeiro do FinançasPro no WhatsApp de Nicolas e Emilyn.
 
-SUAS CAPACIDADES:
-1. Registrar entradas (salários, recebimentos, etc.)
-2. Registrar despesas (gastos, contas, etc.)
-3. Registrar movimentações de investimentos
-4. Marcar itens como pagos/recebidos
-5. Consultar saldo, gastos e resumo do mês
+CATEGORIAS DO USUÁRIO:
+- Entradas: ${catsE}
+- Despesas: ${catsD}
+
+CONTAS BANCÁRIAS: ${contas}
+CARTÕES DE CRÉDITO: ${cartoes}
 
 REGRAS:
-- Sempre responda em português brasileiro, de forma curta e amigável
-- Use emojis com moderação
+- Responda em português, curto e amigável
 - Se faltar valor, pergunte antes de registrar
-- Para datas, use hoje como padrão se não especificado
-- Infira a categoria mais provável com base na descrição
-- "mercado", "feira", "supermercado" → Alimentação
-- "aluguel", "condomínio", "água", "luz", "gás", "internet" → Moradia
-- "gasolina", "uber", "ônibus", "combustível" → Transporte
-- "médico", "farmácia", "dentista" → Saúde
-- "salário", "vale", "pagamento" → Salário (entrada)
-- Valores: interprete "150 reais", "R$150", "150,00", "cento e cinquenta" corretamente
+- Use hoje como data padrão
+- Infira categoria pela descrição
+- CONTA: se mencionar conta explicitamente, use o id. Se não mencionar E tiver mais de 1 conta, coloque needs_conta:true. Se tiver só 1, use ela automaticamente.
+- CARTÃO: se mencionar crédito/cartão sem especificar qual, coloque needs_cartao:true. Se mencionar qual, use o id.
+- Valores: interprete "150 reais", "R$150", "cento e cinquenta" corretamente
 
-FORMATO DE RESPOSTA — JSON VÁLIDO:
+MAPEAMENTO:
+- mercado/feira/supermercado → Alimentação
+- aluguel/luz/água/internet/gás → Moradia
+- gasolina/uber/ônibus → Transporte
+- médico/farmácia/dentista → Saúde
+- salário/vale/pagamento recebido → Salário (entrada)
+- reserva/poupança/caixinha → investimento
+
+RESPONDA SEMPRE EM JSON:
 {
-  "action": "create_despesa" | "create_entrada" | "create_investimento" | "mark_paid" | "query" | "unknown",
-  "data": { ... },
-  "message": "mensagem amigável para o usuário"
+  "action": "create_despesa|create_entrada|create_investimento|mark_paid|query|unknown",
+  "data": {...},
+  "message": "mensagem para o usuário"
 }
 
-create_despesa: { "desc": string, "valor": number, "cat": string, "confirmado": boolean, "data": "YYYY-MM-DD|null" }
-create_entrada: { "desc": string, "valor": number, "cat": string, "confirmado": boolean, "data": "YYYY-MM-DD|null" }
-create_investimento: { "tipo": string, "op": string, "valor": number, "desc": string }
-mark_paid: { "tipo": "despesa|entrada", "desc": string }
-query: { "type": "saldo|resumo|pendentes|gastos|investimentos" }
-unknown: { "pergunta": string }`;
+create_despesa: { "desc":str, "valor":num, "cat":str, "confirmado":bool, "data":"YYYY-MM-DD|null", "conta_id":"id|null", "cartao_id":"id|null", "needs_conta":bool, "needs_cartao":bool }
+create_entrada: { "desc":str, "valor":num, "cat":str, "confirmado":bool, "data":"YYYY-MM-DD|null", "conta_id":"id|null", "needs_conta":bool }
+create_investimento: { "tipo":"reserva|caixinha|renda_fixa|renda_variavel|cripto|previdencia|outro", "op":"aporte|saque|rendimento|saldo", "valor":num, "desc":str }
+mark_paid: { "tipo":"despesa|entrada", "desc":str }
+query: { "type":"saldo|resumo|pendentes|gastos|investimentos" }
+unknown: { "pergunta":str }`;
+}
 
-export async function processMessage(userMessage, senderName, summary) {
-  const contextMessage = summary
-    ? `\n\nCONTEXTO FINANCEIRO ATUAL (${summary.month}):
-- Saldo disponível em conta (acumulado): R$${(summary.saldoDisponivel || 0).toFixed(2)}
-- Entradas recebidas no mês: R$${summary.entradas.confirmado.toFixed(2)} de R$${summary.entradas.total.toFixed(2)} previsto
-- Despesas pagas no mês: R$${summary.despesas.confirmado.toFixed(2)} de R$${summary.despesas.total.toFixed(2)} previsto
-- Cartão/parcelas: R$${summary.cartao.total.toFixed(2)}
-- Saldo realizado no mês: R$${summary.saldoRealizado.toFixed(2)}
-- Saldo previsto no mês: R$${summary.saldoPrevisto.toFixed(2)}
+export async function processMessage(userMessage, senderName, summary, config) {
+  const ctx = summary ? `\n\nCONTEXTO (${summary.month}):
+- Saldo disponível: R$${(summary.saldoDisponivel||0).toFixed(2)}
+- Entradas recebidas: R$${summary.entradas.confirmado.toFixed(2)} / R$${summary.entradas.total.toFixed(2)}
+- Despesas pagas: R$${summary.despesas.confirmado.toFixed(2)} / R$${summary.despesas.total.toFixed(2)}
+- Saldo realizado: R$${summary.saldoRealizado.toFixed(2)}
+- Saldo previsto: R$${summary.saldoPrevisto.toFixed(2)}
 - Total investido: R$${summary.investimentos.total.toFixed(2)}
-- Patrimônio líquido: R$${(summary.patrimonioLiquido || 0).toFixed(2)}
-- Pendente receber: ${summary.pendingEntradas.length} item(s)
-- Pendente pagar: ${summary.pendingDespesas.length} item(s)`
-    : '';
+- Pendentes: ${summary.pendingEntradas.length} entradas, ${summary.pendingDespesas.length} despesas` : '';
 
-  const response = await client.messages.create({
+  const res = await client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: `Mensagem de ${senderName}: "${userMessage}"${contextMessage}` }],
+    system: buildSystemPrompt(config),
+    messages: [{ role: 'user', content: `${senderName}: "${userMessage}"${ctx}` }],
   });
 
-  const text = response.content[0].text.trim();
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/```\s*([\s\S]*?)```/) || [null, text];
-  const jsonStr = (jsonMatch[1] || text).replace(/```json|```/g, '').trim();
-
-  try {
-    return JSON.parse(jsonStr);
-  } catch {
-    return { action: 'unknown', data: {}, message: jsonStr };
-  }
+  const text = res.content[0].text.trim();
+  const match = text.match(/```json\s*([\s\S]*?)```/) || text.match(/```\s*([\s\S]*?)```/) || [null, text];
+  try { return JSON.parse((match[1]||text).replace(/```json|```/g,'').trim()); }
+  catch { return { action: 'unknown', data: {}, message: text }; }
 }
 
-export async function transcribeAudio(audioBuffer, mimeType = 'audio/ogg') {
+export async function transcribeAudio(audioBuffer) {
   if (!process.env.OPENAI_API_KEY) return null;
   const FormData = (await import('form-data')).default;
   const form = new FormData();
-  form.append('file', audioBuffer, { filename: 'audio.ogg', contentType: mimeType });
+  form.append('file', audioBuffer, { filename: 'audio.ogg', contentType: 'audio/ogg' });
   form.append('model', 'whisper-1');
   form.append('language', 'pt');
   const fetch = (await import('node-fetch')).default;
-  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+  const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, ...form.getHeaders() },
     body: form,
   });
-  const data = await res.json();
-  return data.text || null;
+  return (await r.json()).text || null;
 }
