@@ -2,10 +2,29 @@ import 'dotenv/config';
 import express from 'express';
 import { getUserByPhoneDB, getSession, setSession, clearSession, generateCode, verifyCode, sendVerificationEmail } from './auth.js';
 import { handleMessage } from './handler.js';
-import { sendTextMessage, sendTyping, initWhatsApp, getConnectionStatus } from './whatsapp.js';
+import { sendTextMessage, sendTyping, initWhatsApp, getConnectionStatus, getQRCode } from './whatsapp.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+
+// ── QR Code endpoint ───────────────────────────────────────────────────────
+app.get('/qr', async (req, res) => {
+  if (getConnectionStatus()) {
+    return res.send('<h2 style="font-family:sans-serif;color:green">✅ WhatsApp já está conectado!</h2>');
+  }
+  const qrDataURL = await getQRCode();
+  if (!qrDataURL) {
+    return res.send('<h2 style="font-family:sans-serif">⏳ Aguarde... gerando QR code. Recarregue em 5 segundos.</h2><script>setTimeout(()=>location.reload(),5000)</script>');
+  }
+  res.send(`
+    <html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#111;color:#fff">
+      <h2>📱 Escaneie com o WhatsApp do número 6534</h2>
+      <img src="${qrDataURL}" style="width:300px;height:300px;border:4px solid white;border-radius:12px" />
+      <p style="color:#aaa">Esta página atualiza automaticamente a cada 10 segundos</p>
+      <script>setTimeout(()=>location.reload(),10000)</script>
+    </body></html>
+  `);
+});
 
 // ── Health check ───────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
