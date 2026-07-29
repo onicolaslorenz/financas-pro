@@ -44,8 +44,10 @@ export function resolveCartaoByName(mention, cartoes) {
 // ── Month summary ──────────────────────────────────────────────────────────
 function filterItemsForMonth(list, ym) {
   return list.filter(item => {
-    // Transferências entre contas não são receita nem gasto real
-    if (item.transferencia_id) return false;
+    // Transferências entre contas não são receita nem gasto real.
+    // Dupla checagem: pelo vínculo e pela categoria (protege lançamentos
+    // antigos que possam ter ficado sem transferencia_id gravado).
+    if (item.transferencia_id || item.cat === 'Transferência') return false;
     const d = item.data_lancamento || '';
     if (item.recorrente) return d.slice(0, 7) <= ym;
     return d.startsWith(ym);
@@ -73,6 +75,20 @@ function calcInvTotal(invs) {
   });
   return { total: Object.values(por).reduce((s,v) => s+v, 0), porTipo: por };
 }
+// Saldo de UMA conta — espelha calcSaldoConta() do app:
+// saldo_inicial + entradas confirmadas - despesas confirmadas vinculadas à conta
+// (transferências ENTRAM aqui: é exatamente elas que movem dinheiro entre contas)
+function calcSaldoConta(contaId, saldoInicial, entradas, despesas) {
+  const ini = parseFloat(saldoInicial) || 0;
+  const somaE = (entradas || [])
+    .filter(x => x.conta_id === contaId && x.confirmado)
+    .reduce((s, x) => s + parseFloat(x.valor), 0);
+  const somaD = (despesas || [])
+    .filter(x => x.conta_id === contaId && x.confirmado)
+    .reduce((s, x) => s + parseFloat(x.valor), 0);
+  return ini + somaE - somaD;
+}
+
 function calcSaldoAcumulado(entradas, despesas, cartao) {
   const hoje = new Date();
   const ano = hoje.getFullYear(), mes = hoje.getMonth() + 1;
@@ -114,11 +130,12 @@ function calcSaldoAcumulado(entradas, despesas, cartao) {
 export async function getMonthSummary(userId, month = null) {
   const ym = month || activeMonth();
   const [y, m] = ym.split('-').map(Number);
-  const [{ data: entradas }, { data: despesas }, { data: cartao }, { data: invs }] = await Promise.all([
+  const [{ data: entradas }, { data: despesas }, { data: cartao }, { data: invs }, { data: contas }] = await Promise.all([
     supabase.from('entradas').select('*').eq('user_id', userId),
     supabase.from('despesas').select('*').eq('user_id', userId),
     supabase.from('cartao').select('*').eq('user_id', userId),
     supabase.from('investimentos').select('*').eq('user_id', userId),
+    supabase.from('contas').select('*').eq('user_id', userId).eq('ativa', true).order('ordem'),
   ]);
   const me = filterItemsForMonth(entradas||[], ym);
   const md = filterItemsForMonth(despesas||[], ym);
@@ -133,7 +150,17 @@ export async function getMonthSummary(userId, month = null) {
   const confE = me.filter(e=>isConfirmed(e,ym)).reduce((s,e)=>s+parseFloat(e.valor),0);
   const confD = md.filter(e=>isConfirmed(e,ym)).reduce((s,e)=>s+parseFloat(e.valor),0);
   const inv = calcInvTotal(invs||[]);
-  const saldoDisponivel = calcSaldoAcumulado(entradas, despesas, cartao);
+  // Saldo por conta + saldo disponível — mesma regra do app:
+  // com contas cadastradas, o disponível é a SOMA dos saldos das contas
+  // (inclui saldo_inicial). Sem contas, cai no cálculo acumulado histórico.
+  const contasSaldo = (contas || []).map(ct => ({
+    id: ct.id,
+    nome: ct.nome,
+    saldo: calcSaldoConta(ct.id, ct.saldo_inicial, entradas, despesas),
+  }));
+  const saldoDisponivel = contasSaldo.length
+    ? contasSaldo.reduce((s, ct) => s + ct.saldo, 0)
+    : calcSaldoAcumulado(entradas, despesas, cartao);
   return {
     month: ym,
     entradas: { total: totalE, confirmado: confE, count: me.length, confirmedCount: me.filter(e=>isConfirmed(e,ym)).length },
@@ -145,6 +172,7 @@ export async function getMonthSummary(userId, month = null) {
     pendingEntradas: me.filter(e=>!isConfirmed(e,ym)).map(e=>({desc:e.descricao,valor:e.valor})),
     pendingDespesas: md.filter(e=>!isConfirmed(e,ym)).map(e=>({desc:e.descricao,valor:e.valor})),
     investimentos: inv,
+    contasSaldo,
     patrimonioLiquido: saldoDisponivel + inv.total,
   };
 }
