@@ -1,5 +1,5 @@
 import { processMessage, transcribeAudio } from './ai.js';
-import { getMonthSummary, getRecentTransactions, createEntrada, createDespesa, createInvestimento, markAsPaid, getUserConfig, resolveContaByName, resolveCartaoByName } from './supabase.js';
+import { getMonthSummary, getRecentTransactions, createEntrada, createDespesa, createInvestimento, createTransferencia, markAsPaid, getUserConfig, resolveContaByName, resolveCartaoByName } from './supabase.js';
 import { sendTextMessage, sendTyping } from './whatsapp.js';
 
 const INV_TIPOS = { reserva:'Reserva de Emergência', caixinha:'Caixinha/Poupança', renda_fixa:'Renda Fixa', renda_variavel:'Renda Variável', cripto:'Cripto', previdencia:'Previdência', outro:'Outro' };
@@ -86,6 +86,20 @@ async function handlePending(phone, userId, senderName, text) {
 async function executeAction(result, phone, userId, senderName, config, summary) {
   const { action, data } = result;
 
+  // Conta é obrigatória para lançar — mesma regra do app
+  const precisaConta = ['create_entrada','create_despesa','create_transferencia'].includes(action);
+  if (precisaConta && config.contas.length === 0) {
+    await sendTextMessage(phone,
+      '⚠️ Você ainda não tem nenhuma conta bancária cadastrada.\n\n' +
+      'Cadastre em *Configurações* no app antes de lançar:\nhttps://financaspro-nl.netlify.app'
+    );
+    return;
+  }
+  if (action === 'create_transferencia' && config.contas.length < 2) {
+    await sendTextMessage(phone, '⚠️ Você precisa de pelo menos 2 contas cadastradas para transferir.');
+    return;
+  }
+
   // needs_conta: ask if more than 1 conta
   if ((action === 'create_entrada' || action === 'create_despesa') && data.needs_conta && config.contas.length > 1) {
     const list = config.contas.map((c,i) => `${i+1}. ${c.nome}`).join('\n');
@@ -134,6 +148,31 @@ async function executeActionDirect(result, phone, userId, senderName, config, su
         `${message}\n\n💰 *${item.descricao}*\nValor: ${fmt(item.valor)}\nCategoria: ${item.cat}` +
         (contaNome ? `\nConta: ${contaNome}` : '') +
         `\nStatus: ${item.confirmado ? '✅ recebido' : '⏳ pendente'}`
+      );
+      break;
+    }
+    case 'create_transferencia': {
+      const oriId = data.conta_origem_id;
+      const desId = data.conta_destino_id;
+      if (!oriId || !desId) {
+        await sendTextMessage(phone, 'Não identifiquei as contas. Diga assim: _"transferi 500 do Nubank pro Itaú"_');
+        break;
+      }
+      if (oriId === desId) {
+        await sendTextMessage(phone, 'As contas de origem e destino precisam ser diferentes.');
+        break;
+      }
+      const tr = await createTransferencia({
+        userId, contaOrigemId: oriId, contaDestinoId: desId,
+        valor: data.valor, desc: data.desc, data: data.data || null,
+        contas: config.contas,
+      });
+      await sendTextMessage(phone,
+        `${message}\n\n⇄ *Transferência registrada*\n` +
+        `Valor: ${fmt(tr.valor)}\n` +
+        `De: ${tr.nomeOri}\n` +
+        `Para: ${tr.nomeDes}\n` +
+        `Data: ${tr.data}`
       );
       break;
     }
