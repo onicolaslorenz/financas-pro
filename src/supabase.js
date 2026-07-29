@@ -44,6 +44,8 @@ export function resolveCartaoByName(mention, cartoes) {
 // ── Month summary ──────────────────────────────────────────────────────────
 function filterItemsForMonth(list, ym) {
   return list.filter(item => {
+    // Transferências entre contas não são receita nem gasto real
+    if (item.transferencia_id) return false;
     const d = item.data_lancamento || '';
     if (item.recorrente) return d.slice(0, 7) <= ym;
     return d.startsWith(ym);
@@ -190,4 +192,32 @@ export async function markAsPaid({ userId, tipo, descSearch }) {
   const update = item.recorrente ? { status_map: { ...(item.status_map||{}), [ym]: true } } : { confirmado: true };
   await supabase.from(table).update(update).eq('id', item.id);
   return { ...item, ...update };
+}
+
+// ── Transferência entre contas ─────────────────────────────────────────────
+export async function createTransferencia({ userId, contaOrigemId, contaDestinoId, valor, desc, data = null, contas = [] }) {
+  const trId = genId();
+  const dataFinal = data || todayStr();
+  const nomeOri = contas.find(c => c.id === contaOrigemId)?.nome || 'origem';
+  const nomeDes = contas.find(c => c.id === contaDestinoId)?.nome || 'destino';
+  const descBase = desc || 'Transferência entre contas';
+  const descCompleta = `${descBase} (${nomeOri} → ${nomeDes})`;
+
+  const { error: errTr } = await supabase.from('transferencias').insert({
+    id: trId, user_id: userId,
+    conta_origem_id: contaOrigemId, conta_destino_id: contaDestinoId,
+    valor: parseFloat(valor), descricao: descBase, data_lancamento: dataFinal,
+  });
+  if (errTr) throw errTr;
+
+  const base = {
+    descricao: descCompleta, valor: parseFloat(valor), data_lancamento: dataFinal,
+    cat: 'Transferência', recorrente: false, confirmado: true,
+    status_map: {}, transferencia_id: trId, user_id: userId,
+  };
+
+  await supabase.from('despesas').insert({ ...base, id: genId(), conta_id: contaOrigemId });
+  await supabase.from('entradas').insert({ ...base, id: genId(), conta_id: contaDestinoId });
+
+  return { id: trId, valor: parseFloat(valor), desc: descBase, data: dataFinal, nomeOri, nomeDes };
 }
