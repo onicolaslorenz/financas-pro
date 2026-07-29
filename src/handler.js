@@ -202,8 +202,8 @@ async function handleQuery(type, userId, phone, aiMessage, summary, config) {
 
   switch(type) {
     case 'saldo': {
-      const contasInfo = config?.contas?.length
-        ? '\n\n💳 *Por conta:*\n' + config.contas.map(c => `  • ${c.nome}: ${fmt(getContaSaldo(c.id, config, summary))}`).join('\n')
+      const contasInfo = summary?.contasSaldo?.length
+        ? '\n\n💳 *Por conta:*\n' + summary.contasSaldo.map(c => `  • ${c.nome}: ${fmt(c.saldo)}`).join('\n')
         : '';
       await sendTextMessage(phone,
         `💰 *Saldo disponível*\n*${fmt(summary.saldoDisponivel)}*\n_(acumulado)_\n\n` +
@@ -255,9 +255,4 @@ async function handleQuery(type, userId, phone, aiMessage, summary, config) {
     default:
       await sendTextMessage(phone, aiMessage || 'Posso ajudar com saldo, resumo, pendentes, gastos e investimentos!');
   }
-}
-
-function getContaSaldo(contaId, config, summary) {
-  // Simplified — returns 0 as we don't have per-conta breakdown in summary
-  return 0;
 }
