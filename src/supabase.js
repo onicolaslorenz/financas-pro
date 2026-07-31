@@ -80,25 +80,17 @@ function calcInvTotal(invs) {
 // (transferências ENTRAM aqui: é exatamente elas que movem dinheiro entre contas)
 function calcSaldoConta(contaId, saldoInicial, entradas, despesas) {
   const ini = parseFloat(saldoInicial) || 0;
-  const hoje = new Date();
-  const curIdx = hoje.getFullYear() * 12 + (hoje.getMonth() + 1) - 1;
 
   // Espelha calcSaldoConta() do app: não-recorrente conta uma vez se
-  // .confirmado; recorrente soma cada mês (desde a origem, respeitando
-  // limite de repetições) marcado em status_map.
+  // .confirmado; recorrente conta CADA mês marcado em status_map.
+  // Percorremos as chaves do status_map em vez de iterar até "hoje", para
+  // que meses futuros já marcados (ex: parcela de agosto) também contem.
   const somaConfirmado = (item) => {
     if (!item.recorrente) return item.confirmado ? parseFloat(item.valor) : 0;
-    const origemYM = (item.data_lancamento || '').slice(0, 7);
-    if (!origemYM) return 0;
-    const [oy, om] = origemYM.split('-').map(Number);
-    const startIdx = oy * 12 + om - 1;
+    if (!item.status_map) return 0;
     let total = 0;
-    for (let idx = startIdx; idx <= curIdx; idx++) {
-      if (item.repeticoes && (idx - startIdx) >= parseInt(item.repeticoes)) break;
-      const y = Math.floor(idx / 12);
-      const m = (idx % 12) + 1;
-      const ym = `${y}-${String(m).padStart(2, '0')}`;
-      if (item.status_map && item.status_map[ym]) total += parseFloat(item.valor);
+    for (const ym in item.status_map) {
+      if (item.status_map[ym]) total += parseFloat(item.valor);
     }
     return total;
   };
@@ -115,24 +107,18 @@ function calcSaldoAcumulado(entradas, despesas, cartao) {
   let totalE = 0;
   (entradas||[]).forEach(e => {
     if (e.recorrente) {
-      const [oy,om] = (e.data_lancamento||'').slice(0,7).split('-').map(Number);
-      if (!oy) return;
-      for (let idx = oy*12+om-1; idx <= curIdx; idx++) {
-        if (e.repeticoes && (idx-(oy*12+om-1)) >= parseInt(e.repeticoes)) break;
-        const ym = `${Math.floor(idx/12)}-${String((idx%12)+1).padStart(2,'0')}`;
-        if (e.status_map?.[ym]) totalE += parseFloat(e.valor);
+      if (!e.status_map) return;
+      for (const ym in e.status_map) {
+        if (e.status_map[ym]) totalE += parseFloat(e.valor);
       }
     } else { if (e.confirmado) totalE += parseFloat(e.valor); }
   });
   let totalD = 0;
   (despesas||[]).forEach(e => {
     if (e.recorrente) {
-      const [oy,om] = (e.data_lancamento||'').slice(0,7).split('-').map(Number);
-      if (!oy) return;
-      for (let idx = oy*12+om-1; idx <= curIdx; idx++) {
-        if (e.repeticoes && (idx-(oy*12+om-1)) >= parseInt(e.repeticoes)) break;
-        const ym = `${Math.floor(idx/12)}-${String((idx%12)+1).padStart(2,'0')}`;
-        if (e.status_map?.[ym]) totalD += parseFloat(e.valor);
+      if (!e.status_map) return;
+      for (const ym in e.status_map) {
+        if (e.status_map[ym]) totalD += parseFloat(e.valor);
       }
     } else { if (e.confirmado) totalD += parseFloat(e.valor); }
   });
