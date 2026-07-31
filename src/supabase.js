@@ -80,12 +80,31 @@ function calcInvTotal(invs) {
 // (transferências ENTRAM aqui: é exatamente elas que movem dinheiro entre contas)
 function calcSaldoConta(contaId, saldoInicial, entradas, despesas) {
   const ini = parseFloat(saldoInicial) || 0;
-  const somaE = (entradas || [])
-    .filter(x => x.conta_id === contaId && x.confirmado)
-    .reduce((s, x) => s + parseFloat(x.valor), 0);
-  const somaD = (despesas || [])
-    .filter(x => x.conta_id === contaId && x.confirmado)
-    .reduce((s, x) => s + parseFloat(x.valor), 0);
+  const hoje = new Date();
+  const curIdx = hoje.getFullYear() * 12 + (hoje.getMonth() + 1) - 1;
+
+  // Espelha calcSaldoConta() do app: não-recorrente conta uma vez se
+  // .confirmado; recorrente soma cada mês (desde a origem, respeitando
+  // limite de repetições) marcado em status_map.
+  const somaConfirmado = (item) => {
+    if (!item.recorrente) return item.confirmado ? parseFloat(item.valor) : 0;
+    const origemYM = (item.data_lancamento || '').slice(0, 7);
+    if (!origemYM) return 0;
+    const [oy, om] = origemYM.split('-').map(Number);
+    const startIdx = oy * 12 + om - 1;
+    let total = 0;
+    for (let idx = startIdx; idx <= curIdx; idx++) {
+      if (item.repeticoes && (idx - startIdx) >= parseInt(item.repeticoes)) break;
+      const y = Math.floor(idx / 12);
+      const m = (idx % 12) + 1;
+      const ym = `${y}-${String(m).padStart(2, '0')}`;
+      if (item.status_map && item.status_map[ym]) total += parseFloat(item.valor);
+    }
+    return total;
+  };
+
+  const somaE = (entradas || []).filter(x => x.conta_id === contaId).reduce((s, x) => s + somaConfirmado(x), 0);
+  const somaD = (despesas || []).filter(x => x.conta_id === contaId).reduce((s, x) => s + somaConfirmado(x), 0);
   return ini + somaE - somaD;
 }
 
