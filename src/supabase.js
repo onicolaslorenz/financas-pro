@@ -254,3 +254,97 @@ export async function createTransferencia({ userId, contaOrigemId, contaDestinoI
 
   return { id: trId, valor: parseFloat(valor), desc: descBase, data: dataFinal, nomeOri, nomeDes };
 }
+
+// ── Busca e remoção ────────────────────────────────────────────────────────
+
+// Procura lançamentos que combinem com o que o usuário descreveu.
+// Retorna vários candidatos para o bot poder perguntar qual é o certo.
+export async function searchLancamentos({ userId, termo = '', valor = null, tipo = null, limit = 8 }) {
+  const alvos = tipo ? [tipo] : ['despesa', 'entrada', 'investimento', 'cartao'];
+  const achados = [];
+
+  if (alvos.includes('despesa') || alvos.includes('entrada')) {
+    for (const t of ['despesa', 'entrada']) {
+      if (!alvos.includes(t)) continue;
+      const table = t === 'entrada' ? 'entradas' : 'despesas';
+      let q = supabase.from(table).select('*').eq('user_id', userId);
+      if (termo) q = q.ilike('descricao', `%${termo}%`);
+      if (valor != null) q = q.eq('valor', valor);
+      const { data } = await q.order('data_lancamento', { ascending: false }).limit(limit);
+      (data || []).forEach(r => achados.push({
+        tipo: t, id: r.id, desc: r.descricao, valor: r.valor,
+        data: r.data_lancamento, cat: r.cat, conta_id: r.conta_id,
+      }));
+    }
+  }
+
+  if (alvos.includes('cartao')) {
+    let q = supabase.from('cartao').select('*').eq('user_id', userId);
+    if (termo) q = q.ilike('descricao', `%${termo}%`);
+    const { data } = await q.order('created_at', { ascending: false }).limit(limit);
+    (data || []).forEach(r => {
+      if (valor != null && parseFloat(r.total) !== parseFloat(valor)) return;
+      achados.push({
+        tipo: 'cartao', id: r.id, desc: r.descricao, valor: r.total,
+        data: r.inicio, parcelas: r.parcelas,
+      });
+    });
+  }
+
+  if (alvos.includes('investimento')) {
+    let q = supabase.from('investimentos').select('*').eq('user_id', userId);
+    if (termo) q = q.ilike('descricao', `%${termo}%`);
+    if (valor != null) q = q.eq('valor', valor);
+    const { data } = await q.order('data_lancamento', { ascending: false }).limit(limit);
+    (data || []).forEach(r => achados.push({
+      tipo: 'investimento', id: r.id, desc: r.descricao || `${r.op} ${r.tipo}`,
+      valor: r.valor, data: r.data_lancamento, op: r.op, invTipo: r.tipo,
+    }));
+  }
+
+  return achados.slice(0, limit);
+}
+
+// Remove um item. Transferência e parcelamento removem o conjunto inteiro.
+export async function deleteLancamento({ userId, tipo, id }) {
+  const tabelas = { entrada: 'entradas', despesa: 'despesas', cartao: 'cartao', investimento: 'investimentos' };
+  const table = tabelas[tipo];
+  if (!table) throw new Error('Tipo inválido: ' + tipo);
+
+  // Se for parte de uma transferência, apaga os dois lados + o registro
+  if (tipo === 'entrada' || tipo === 'despesa') {
+    const { data: row } = await supabase.from(table).select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+    if (!row) return { ok: false, reason: 'Lançamento não encontrado.' };
+
+    if (row.transferencia_id) {
+      const trId = row.transferencia_id;
+      await supabase.from('entradas').delete().eq('transferencia_id', trId).eq('user_id', userId);
+      await supabase.from('despesas').delete().eq('transferencia_id', trId).eq('user_id', userId);
+      await supabase.from('transferencias').delete().eq('id', trId).eq('user_id', userId);
+      return { ok: true, removido: row.descricao, eraTransferencia: true };
+    }
+
+    // Investimento vinculado: remove o movimento junto
+    const { data: inv } = await supabase.from('investimentos').select('id').eq('linked_id', id).eq('user_id', userId);
+    if (inv && inv.length) {
+      for (const i of inv) await supabase.from('investimentos').delete().eq('id', i.id).eq('user_id', userId);
+    }
+
+    const { error } = await supabase.from(table).delete().eq('id', id).eq('user_id', userId);
+    if (error) throw error;
+    return { ok: true, removido: row.descricao };
+  }
+
+  const { data: row } = await supabase.from(table).select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+  if (!row) return { ok: false, reason: 'Item não encontrado.' };
+
+  // Investimento com lançamento vinculado: remove o lançamento junto
+  if (tipo === 'investimento' && row.linked_id) {
+    await supabase.from('despesas').delete().eq('id', row.linked_id).eq('user_id', userId);
+    await supabase.from('entradas').delete().eq('id', row.linked_id).eq('user_id', userId);
+  }
+
+  const { error } = await supabase.from(table).delete().eq('id', id).eq('user_id', userId);
+  if (error) throw error;
+  return { ok: true, removido: row.descricao || row.desc || 'item', parcelas: row.parcelas };
+}
