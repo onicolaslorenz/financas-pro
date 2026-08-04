@@ -1,5 +1,5 @@
 import { processMessage, transcribeAudio } from './ai.js';
-import { getMonthSummary, getRecentTransactions, createEntrada, createDespesa, createInvestimento, createTransferencia, markAsPaid, getUserConfig, resolveContaByName, resolveCartaoByName } from './supabase.js';
+import { getMonthSummary, getRecentTransactions, createEntrada, createDespesa, createInvestimento, createTransferencia, markAsPaid, getUserConfig, resolveContaByName, resolveCartaoByName, searchLancamentos, deleteLancamento } from './supabase.js';
 import { sendTextMessage, sendTyping } from './whatsapp.js';
 
 const INV_TIPOS = { reserva:'Reserva de Emergência', caixinha:'Caixinha/Poupança', renda_fixa:'Renda Fixa', renda_variavel:'Renda Variável', cripto:'Cripto', previdencia:'Previdência', outro:'Outro' };
@@ -63,7 +63,37 @@ async function handlePending(phone, userId, senderName, text) {
 
   if (input === 'cancelar' || input === 'nao' || input === 'não') {
     delete pending[phone];
+    // Nos fluxos de remoção, cancelar significa NÃO apagar nada
+    if (type === 'escolha_delete' || type === 'confirma_delete') {
+      await sendTextMessage(phone, 'Ok, não removi nada.');
+      return;
+    }
     await executeActionDirect(action, phone, userId, senderName, config);
+    return;
+  }
+
+  // Escolha de qual item remover, quando a busca achou mais de um
+  if (type === 'escolha_delete') {
+    const num = parseInt(input);
+    const escolhido = (!isNaN(num) && num >= 1 && num <= sess.candidatos.length)
+      ? sess.candidatos[num - 1]
+      : sess.candidatos.find(x => x.desc && x.desc.toLowerCase().includes(input));
+
+    if (!escolhido) {
+      await sendTextMessage(phone, `Não entendi qual. Responda com o *número* (1 a ${sess.candidatos.length}) ou envie *cancelar*.`);
+      return;  // mantém a sessão viva para nova tentativa
+    }
+    delete pending[phone];
+    await confirmarRemocao(phone, userId, escolhido);
+    return;
+  }
+
+  // Confirmação final antes de apagar
+  if (type === 'confirma_delete') {
+    const sim = ['sim','s','ok','confirmo','pode','isso','yes','1'].includes(input);
+    delete pending[phone];
+    if (!sim) { await sendTextMessage(phone, 'Ok, não removi nada.'); return; }
+    await efetivarRemocao(phone, userId, sess.item);
     return;
   }
 
@@ -187,6 +217,28 @@ async function executeActionDirect(result, phone, userId, senderName, config, su
       else await sendTextMessage(phone, 'Não encontrei esse lançamento. Verifique no app.');
       break;
     }
+    case 'delete_item': {
+      const candidatos = await searchLancamentos({
+        userId, termo: data.termo || '', valor: data.valor ?? null, tipo: data.tipo || null,
+      });
+
+      if (!candidatos.length) {
+        await sendTextMessage(phone, `Não encontrei nada com "${data.termo || ''}". Confira a descrição no app e tente de novo.`);
+        break;
+      }
+
+      if (candidatos.length === 1) {
+        await confirmarRemocao(phone, userId, candidatos[0]);
+        break;
+      }
+
+      // Vários candidatos — pergunta qual, guardando a lista na sessão
+      const lista = candidatos.map((x, i) => `${i + 1}. ${rotuloItem(x)}`).join('\n');
+      pending[phone] = { type: 'escolha_delete', candidatos };
+      setTimeout(() => { delete pending[phone]; }, 5 * 60 * 1000);
+      await sendTextMessage(phone, `Encontrei ${candidatos.length} lançamentos. Qual devo remover?\n\n${lista}\n\n_Responda com o número ou *cancelar*_`);
+      break;
+    }
     case 'query': {
       const sum = summary || await getMonthSummary(userId).catch(()=>null);
       await handleQuery(data.type, userId, phone, message, sum, config);
@@ -254,5 +306,41 @@ async function handleQuery(type, userId, phone, aiMessage, summary, config) {
     }
     default:
       await sendTextMessage(phone, aiMessage || 'Posso ajudar com saldo, resumo, pendentes, gastos e investimentos!');
+  }
+}
+
+// ── Remoção: rótulo, confirmação e execução ────────────────────────────────
+const TIPO_ROTULO = { entrada: '💰 Entrada', despesa: '💸 Despesa', cartao: '💳 Cartão', investimento: '📈 Investimento' };
+
+function rotuloItem(x) {
+  const base = `${TIPO_ROTULO[x.tipo] || x.tipo} — ${x.desc} (${fmt(x.valor)})`;
+  if (x.tipo === 'cartao' && x.parcelas) return `${base}, ${x.parcelas}x`;
+  if (x.data) return `${base} · ${x.data}`;
+  return base;
+}
+
+async function confirmarRemocao(phone, userId, item) {
+  let aviso = '';
+  if (item.tipo === 'cartao' && item.parcelas > 1) {
+    aviso = `\n\n⚠️ Isso remove a compra inteira (${item.parcelas} parcelas).`;
+  }
+  pending[phone] = { type: 'confirma_delete', item };
+  setTimeout(() => { delete pending[phone]; }, 5 * 60 * 1000);
+  await sendTextMessage(phone,
+    `Confirma a remoção?\n\n${rotuloItem(item)}${aviso}\n\n_Responda *sim* para remover ou *cancelar*_`
+  );
+}
+
+async function efetivarRemocao(phone, userId, item) {
+  try {
+    const r = await deleteLancamento({ userId, tipo: item.tipo, id: item.id });
+    if (!r.ok) { await sendTextMessage(phone, `❌ ${r.reason}`); return; }
+    let extra = '';
+    if (r.eraTransferencia) extra = '\n_(os dois lados da transferência foram removidos)_';
+    else if (item.tipo === 'cartao' && item.parcelas > 1) extra = `\n_(${item.parcelas} parcelas removidas)_`;
+    await sendTextMessage(phone, `🗑️ *${r.removido}* removido com sucesso.${extra}`);
+  } catch(e) {
+    console.error('Erro ao remover:', e);
+    await sendTextMessage(phone, '❌ Não consegui remover agora. Tente novamente em instantes.');
   }
 }
