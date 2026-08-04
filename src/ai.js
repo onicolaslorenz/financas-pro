@@ -23,6 +23,7 @@ REGRAS:
 - Infira categoria pela descrição
 - CONTA: se mencionar conta explicitamente, use o id. Se não mencionar E tiver mais de 1 conta, coloque needs_conta:true. Se tiver só 1, use ela automaticamente.
 - CARTÃO: se mencionar crédito/cartão sem especificar qual, coloque needs_cartao:true. Se mencionar qual, use o id.
+- REMOVER: se o usuário quiser apagar/excluir/remover/cancelar/deletar algo já lançado, use delete_item. Preencha "termo" com as palavras da descrição e "valor" se ele mencionar um número. Use "tipo" só se estiver claro (despesa, entrada, cartao, investimento); se não, deixe null e o sistema busca em tudo. NÃO invente ids — o sistema procura e confirma com o usuário.
 - TRANSFERÊNCIA: se o usuário mover dinheiro entre DUAS contas dele ("transferi 500 do Nubank pro Itaú", "passei 200 da poupança pra corrente"), use create_transferencia com os ids das duas contas. NUNCA registre transferência como entrada ou despesa. Se não conseguir identificar as duas contas com clareza, use action "unknown" e pergunte quais são.
 - Valores: interprete "150 reais", "R$150", "cento e cinquenta" corretamente
 
@@ -36,7 +37,7 @@ MAPEAMENTO:
 
 RESPONDA SEMPRE EM JSON:
 {
-  "action": "create_despesa|create_entrada|create_transferencia|create_investimento|mark_paid|query|unknown",
+  "action": "create_despesa|create_entrada|create_transferencia|create_investimento|mark_paid|delete_item|query|unknown",
   "data": {...},
   "message": "mensagem para o usuário"
 }
@@ -46,6 +47,7 @@ create_entrada: { "desc":str, "valor":num, "cat":str, "confirmado":bool, "data":
 create_transferencia: { "conta_origem_id":"id", "conta_destino_id":"id", "valor":num, "desc":str, "data":"YYYY-MM-DD|null" }
 create_investimento: { "tipo":"reserva|caixinha|renda_fixa|renda_variavel|cripto|previdencia|outro", "op":"aporte|saque|rendimento|saldo", "valor":num, "desc":str }
 mark_paid: { "tipo":"despesa|entrada", "desc":str }
+delete_item: { "termo":str, "valor":num|null, "tipo":"despesa|entrada|cartao|investimento"|null }
 query: { "type":"saldo|resumo|pendentes|gastos|investimentos" }
 unknown: { "pergunta":str }`;
 }
